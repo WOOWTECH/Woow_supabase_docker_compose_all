@@ -1,0 +1,21 @@
+# Environment secrets / 環境機密
+.env
+.env.old
+
+# Database data / 資料庫資料
+volumes/db/data/
+
+# Storage data / 儲存資料
+volumes/storage/
+
+# Studio snippets / Studio 程式碼片段
+volumes/snippets/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Planning files
+task_plan.md
+findings.md
+progress.md
