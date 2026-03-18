@@ -122,11 +122,213 @@ kubectl apply -k k8s-manifests/supabase/
 # 4. Wait for database to be ready (other services depend on it)
 kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120s
 
-# 5. Verify all pods are running
+# 5. Run the REQUIRED post-deploy database setup (see next section)
+#    This is critical - the supabase/postgres image skips init scripts!
+
+# 6. Verify all pods are running
 kubectl -n supabase get pods
 
-# 6. Watch deployment progress
+# 7. Watch deployment progress
 kubectl -n supabase get pods -w
+```
+
+### Post-Deployment Database Setup (CRITICAL)
+
+> **Why is this needed?** The `supabase/postgres` image ships with a pre-built PostgreSQL data directory baked into the container image. This means `docker-entrypoint-initdb.d` scripts are **always skipped** (the entrypoint detects an existing database and prints "Skipping initialization"). You must run these setup steps manually after the database pod is running.
+
+After deploying and the `db-0` pod is Ready, run the following SQL commands:
+
+```bash
+# Connect to the database
+kubectl -n supabase exec -it sts/db -- psql -U supabase_admin postgres
+```
+
+#### Step 1: Create required roles and set passwords
+
+```sql
+-- Create the 'postgres' role (required by GoTrue and Storage migrations)
+-- The supabase/postgres image uses 'supabase_admin' as superuser, but GoTrue/Storage
+-- migration SQL files hardcode 'GRANT ... TO postgres'
+CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE
+  REPLICATION BYPASSRLS PASSWORD 'YOUR_POSTGRES_PASSWORD';
+
+-- Set passwords for all service roles (replace YOUR_POSTGRES_PASSWORD)
+ALTER ROLE supabase_auth_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_storage_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_functions_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_realtime_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE authenticator WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE pgbouncer WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+```
+
+#### Step 2: Grant schema permissions
+
+```sql
+-- PostgreSQL 15 changed public schema ownership - grant access to service roles
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT ALL ON SCHEMA public TO supabase_storage_admin;
+GRANT ALL ON SCHEMA public TO supabase_functions_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+
+-- Grant default privileges for dashboard users
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+```
+
+#### Step 3: Create `_supabase` database (for Analytics & Supavisor)
+
+```sql
+-- Analytics (Logflare) and Supavisor need the _supabase database
+CREATE DATABASE _supabase OWNER supabase_admin;
+\c _supabase
+CREATE SCHEMA IF NOT EXISTS _analytics;
+\c postgres
+```
+
+#### Step 4: Fix GoTrue enum schema location (IMPORTANT)
+
+```sql
+-- GoTrue migrations create enum types (factor_type, factor_status, etc.) in the
+-- 'public' schema, but later migrations reference them as 'auth.factor_type'.
+-- After GoTrue runs its first batch of migrations, move the enums to auth schema.
+--
+-- TIMING: Run this AFTER the auth pod has started once (it will crash on first
+-- attempt). Then restart auth after moving the enums.
+
+-- Check if enums exist in public schema:
+SELECT n.nspname, t.typname FROM pg_type t
+  JOIN pg_namespace n ON t.typnamespace = n.oid
+  JOIN pg_enum e ON t.oid = e.enumtypid
+  WHERE n.nspname = 'public'
+  GROUP BY n.nspname, t.typname;
+
+-- Move auth-related enums from public to auth schema:
+ALTER TYPE public.factor_type SET SCHEMA auth;
+ALTER TYPE public.factor_status SET SCHEMA auth;
+ALTER TYPE public.aal_level SET SCHEMA auth;
+ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+```
+
+#### Step 5: Restart services
+
+```bash
+# After completing all SQL setup, restart all deployments
+kubectl -n supabase rollout restart deploy --all
+
+# Watch until all pods are 1/1 Running
+kubectl -n supabase get pods -w
+```
+
+### Deployment Quick Reference (One-Shot Script)
+
+For convenience, here is the complete post-deploy setup as a single script:
+
+```bash
+#!/bin/bash
+# Run after: kubectl apply -k k8s-manifests/supabase/
+# Wait for DB to be ready first:
+#   kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120s
+
+NS="supabase"
+PG_PASS="YOUR_POSTGRES_PASSWORD"  # Must match secret.yaml POSTGRES_PASSWORD
+
+# Step 1-3: Roles, grants, _supabase database
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres <<EOSQL
+-- Create postgres role (needed by GoTrue/Storage migration SQL)
+DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='postgres') THEN
+    EXECUTE format('CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS PASSWORD %L', '$PG_PASS');
+  END IF;
+END \$\$;
+
+-- Set passwords for service roles
+ALTER ROLE supabase_auth_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_storage_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_functions_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_realtime_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE authenticator WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE pgbouncer WITH LOGIN PASSWORD '$PG_PASS';
+
+-- Schema grants (PostgreSQL 15 public schema changes)
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT ALL ON SCHEMA public TO supabase_storage_admin;
+GRANT ALL ON SCHEMA public TO supabase_functions_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+
+-- Default privileges for dashboard
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+EOSQL
+
+# Create _supabase database
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres -c \
+  "SELECT 1 FROM pg_database WHERE datname='_supabase'" | grep -q 1 || \
+  kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres -c \
+  "CREATE DATABASE _supabase OWNER supabase_admin;"
+
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d _supabase -c \
+  "CREATE SCHEMA IF NOT EXISTS _analytics;"
+
+echo "=== Steps 1-3 done. Restarting services... ==="
+kubectl -n $NS rollout restart deploy --all
+
+echo "=== Waiting 30s for GoTrue to run initial migrations... ==="
+sleep 30
+
+# Step 4: Move enums from public to auth schema
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres <<EOSQL
+DO \$\$ BEGIN
+  -- Only move if they exist in public schema
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='factor_type' AND n.nspname='public') THEN
+    ALTER TYPE public.factor_type SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='factor_status' AND n.nspname='public') THEN
+    ALTER TYPE public.factor_status SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='aal_level' AND n.nspname='public') THEN
+    ALTER TYPE public.aal_level SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='code_challenge_method' AND n.nspname='public') THEN
+    ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='one_time_token_type' AND n.nspname='public') THEN
+    ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+  END IF;
+END \$\$;
+EOSQL
+
+echo "=== Step 4 done. Restarting auth... ==="
+kubectl -n $NS rollout restart deploy/auth
+
+echo "=== Post-deploy setup complete! Check with: kubectl -n $NS get pods ==="
 ```
 
 ### Configuration
@@ -323,6 +525,97 @@ kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120
 kubectl -n supabase rollout restart deploy --all
 ```
 
+#### Auth: `type "auth.factor_type" does not exist (SQLSTATE 42704)`
+
+**Root Cause:** GoTrue's early migrations create enum types (`factor_type`, `factor_status`, `aal_level`, `code_challenge_method`, `one_time_token_type`) in the `public` schema (without schema qualification). Later migrations (e.g., `20240729123726_add_mfa_phone_config`) reference them as `auth.factor_type`, which fails because the enum is in `public`, not `auth`.
+
+**Fix:** Move the enums to the `auth` schema:
+
+```sql
+ALTER TYPE public.factor_type SET SCHEMA auth;
+ALTER TYPE public.factor_status SET SCHEMA auth;
+ALTER TYPE public.aal_level SET SCHEMA auth;
+ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+```
+
+Then restart auth: `kubectl -n supabase rollout restart deploy/auth`
+
+> **Important:** If you have old auth ReplicaSets with pods still in CrashLoopBackOff, scale them down first to prevent them from interfering:
+> ```bash
+> kubectl -n supabase get rs -l component=auth
+> kubectl -n supabase scale rs/<old-replicaset-name> --replicas=0
+> ```
+
+#### Auth: `role "postgres" does not exist`
+
+**Root Cause:** GoTrue and Storage migration SQL files contain hardcoded `GRANT ... TO postgres` statements. The `supabase/postgres` image uses `supabase_admin` as the superuser, not `postgres`.
+
+**Fix:** Create the `postgres` role:
+```sql
+CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE
+  REPLICATION BYPASSRLS PASSWORD 'YOUR_POSTGRES_PASSWORD';
+```
+
+#### Auth: `permission denied for schema public (SQLSTATE 42501)`
+
+**Root Cause:** PostgreSQL 15 changed `public` schema ownership from `postgres` to `pg_database_owner`. Service roles don't have CREATE privilege on public by default.
+
+**Fix:**
+```sql
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+```
+
+#### Analytics/Supavisor: database `_supabase` does not exist
+
+**Root Cause:** The `supabase/postgres` image does not create the `_supabase` database. Analytics (Logflare) and Supavisor need it.
+
+**Fix:**
+```sql
+CREATE DATABASE _supabase OWNER supabase_admin;
+\c _supabase
+CREATE SCHEMA IF NOT EXISTS _analytics;
+```
+
+#### Realtime: health check returning 404
+
+**Root Cause:** `supabase/realtime` v2.x (Elixir-based) does not expose an HTTP `/api/health` endpoint. The health endpoint is tenant-based.
+
+**Fix:** Use a TCP socket probe instead of HTTP:
+```yaml
+livenessProbe:
+  tcpSocket:
+    port: 4000
+readinessProbe:
+  tcpSocket:
+    port: 4000
+```
+
+#### Realtime: `cookie store expects conn.secret_key_base to be at least 64 bytes`
+
+**Root Cause:** The `SECRET_KEY_BASE` value in `secret.yaml` is shorter than 64 bytes.
+
+**Fix:** Ensure `SECRET_KEY_BASE` is at least 64 characters:
+```bash
+# Generate a 64+ char secret
+openssl rand -base64 48
+# Encode for secret.yaml
+echo -n 'your-64-char-or-longer-secret' | base64
+```
+
+#### Studio: readiness probe failing on `/api/profile`
+
+**Root Cause:** The `/api/profile` endpoint requires authentication and returns non-200 when unauthenticated.
+
+**Fix:** Use a TCP socket probe instead:
+```yaml
+readinessProbe:
+  tcpSocket:
+    port: 3000
+```
+
 #### Kong returning 502 errors
 
 The upstream service is not reachable. Check if the target service pod is running:
@@ -378,6 +671,37 @@ kubectl -n supabase exec deploy/storage -- df -h /var/lib/storage
 # Check imgproxy for image transformation issues
 kubectl -n supabase logs deploy/imgproxy
 ```
+
+### Known Issues & Important Notes
+
+| Issue | Cause | Status |
+|-------|-------|--------|
+| `docker-entrypoint-initdb.d` scripts never run | `supabase/postgres` image has pre-built data directory | By design - use manual post-deploy setup |
+| GoTrue creates enums in `public` schema | GoTrue SQL creates types without schema qualifier | Workaround: `ALTER TYPE ... SET SCHEMA auth` |
+| GoTrue/Storage require `postgres` role | Migration SQL hardcodes `GRANT ... TO postgres` | Workaround: create `postgres` role manually |
+| PostgreSQL 15 `public` schema permissions | PG15 changed ownership to `pg_database_owner` | Workaround: explicit GRANT statements |
+| Realtime has no HTTP health endpoint | Elixir-based app uses tenant-specific checks | Fixed: TCP socket probe |
+| Studio `/api/profile` requires auth | Next.js API route needs session | Fixed: TCP socket probe |
+
+### Deployment Verified Status
+
+All 13 services tested and confirmed running on k3s (2026-03-18):
+
+| Service | Image | Status | Health Check |
+|---------|-------|--------|--------------|
+| PostgreSQL (db) | `supabase/postgres:15.8.1.085` | Running | TCP :5432 |
+| Auth (GoTrue) | `supabase/gotrue:v2.185.0` | Running | HTTP `/health` → `{"version":"v2.185.0"}` |
+| REST (PostgREST) | `postgrest/postgrest:v12.2.8` | Running | HTTP `/` → 200 |
+| Realtime | `supabase/realtime:v2.72.0` | Running | TCP :4000 |
+| Storage | `supabase/storage-api:v1.22.12` | Running | HTTP `/status` → 200 |
+| Studio | `supabase/studio:2026.01.27-sha-6aa59ff` | Running | TCP :3000 |
+| Kong | `kong:2` | Running | HTTP → routes traffic |
+| Meta | `supabase/postgres-meta:v0.86.1` | Running | HTTP `/health` → `{"date":"..."}` |
+| Functions | `supabase/edge-runtime:v1.67.4` | Running | HTTP `/` → 200 |
+| Analytics | `supabase/logflare:1.12.0` | Running | HTTP `/` → 302 |
+| Supavisor | `supabase/supavisor:2.5.1` | Running | TCP :5432/:6543 |
+| imgproxy | `darthsim/imgproxy:v3.8.0` | Running | HTTP `/` → 200 |
+| Vector | `timberio/vector:0.34.0-alpine` | Running | TCP :9001 |
 
 ### Production Checklist
 
@@ -552,11 +876,212 @@ kubectl apply -k k8s-manifests/supabase/
 # 4. 等待資料庫就緒（其他服務依賴它）
 kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120s
 
-# 5. 確認所有 Pod 正在運行
+# 5. 執行必要的部署後資料庫設定（見下一節）
+#    這是關鍵步驟 - supabase/postgres 映像檔會跳過 init 腳本！
+
+# 6. 確認所有 Pod 正在運行
 kubectl -n supabase get pods
 
-# 6. 觀察部署進度
+# 7. 觀察部署進度
 kubectl -n supabase get pods -w
+```
+
+### 部署後資料庫設定（關鍵步驟）
+
+> **為什麼需要這個？** `supabase/postgres` 映像檔在容器映像中預先建立了 PostgreSQL 資料目錄。這表示 `docker-entrypoint-initdb.d` 腳本**永遠會被跳過**（入口點偵測到現有資料庫後會顯示「Skipping initialization」）。您必須在資料庫 Pod 運行後手動執行這些設定步驟。
+
+部署完成且 `db-0` Pod 就緒後，執行以下 SQL 命令：
+
+```bash
+# 連線到資料庫
+kubectl -n supabase exec -it sts/db -- psql -U supabase_admin postgres
+```
+
+#### 步驟一：建立必要角色並設定密碼
+
+```sql
+-- 建立 'postgres' 角色（GoTrue 和 Storage 的 migration SQL 需要）
+-- supabase/postgres 映像檔使用 'supabase_admin' 作為超級使用者，
+-- 但 GoTrue/Storage 的 migration SQL 硬編碼了 'GRANT ... TO postgres'
+CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE
+  REPLICATION BYPASSRLS PASSWORD 'YOUR_POSTGRES_PASSWORD';
+
+-- 設定所有服務角色的密碼（替換 YOUR_POSTGRES_PASSWORD）
+ALTER ROLE supabase_auth_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_storage_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_functions_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE supabase_realtime_admin WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE authenticator WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+ALTER ROLE pgbouncer WITH LOGIN PASSWORD 'YOUR_POSTGRES_PASSWORD';
+```
+
+#### 步驟二：授予 Schema 權限
+
+```sql
+-- PostgreSQL 15 更改了 public schema 的擁有權 - 授予服務角色存取權
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT ALL ON SCHEMA public TO supabase_storage_admin;
+GRANT ALL ON SCHEMA public TO supabase_functions_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+
+-- 授予儀表板使用者預設權限
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+```
+
+#### 步驟三：建立 `_supabase` 資料庫（Analytics 和 Supavisor 需要）
+
+```sql
+-- Analytics (Logflare) 和 Supavisor 需要 _supabase 資料庫
+CREATE DATABASE _supabase OWNER supabase_admin;
+\c _supabase
+CREATE SCHEMA IF NOT EXISTS _analytics;
+\c postgres
+```
+
+#### 步驟四：修正 GoTrue enum schema 位置（重要）
+
+```sql
+-- GoTrue 的 migration 會在 'public' schema 建立 enum 類型（factor_type、
+-- factor_status 等），但後續 migration 會以 'auth.factor_type' 引用它們。
+-- 在 GoTrue 首次執行 migration 後，將 enum 移至 auth schema。
+--
+-- 時機：在 auth Pod 首次啟動後執行（第一次可能會 crash）。
+-- 移動 enum 後重新啟動 auth。
+
+-- 檢查 enum 是否存在於 public schema：
+SELECT n.nspname, t.typname FROM pg_type t
+  JOIN pg_namespace n ON t.typnamespace = n.oid
+  JOIN pg_enum e ON t.oid = e.enumtypid
+  WHERE n.nspname = 'public'
+  GROUP BY n.nspname, t.typname;
+
+-- 將 auth 相關 enum 從 public 移至 auth schema：
+ALTER TYPE public.factor_type SET SCHEMA auth;
+ALTER TYPE public.factor_status SET SCHEMA auth;
+ALTER TYPE public.aal_level SET SCHEMA auth;
+ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+```
+
+#### 步驟五：重新啟動服務
+
+```bash
+# 完成所有 SQL 設定後，重新啟動所有 Deployment
+kubectl -n supabase rollout restart deploy --all
+
+# 觀察直到所有 Pod 顯示 1/1 Running
+kubectl -n supabase get pods -w
+```
+
+### 部署快速參考（一鍵腳本）
+
+為方便使用，以下是完整的部署後設定腳本：
+
+```bash
+#!/bin/bash
+# 執行於: kubectl apply -k k8s-manifests/supabase/ 之後
+# 先等待 DB 就緒:
+#   kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120s
+
+NS="supabase"
+PG_PASS="YOUR_POSTGRES_PASSWORD"  # 必須與 secret.yaml 中的 POSTGRES_PASSWORD 一致
+
+# 步驟 1-3：角色、權限、_supabase 資料庫
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres <<EOSQL
+-- 建立 postgres 角色（GoTrue/Storage migration SQL 需要）
+DO \$\$ BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='postgres') THEN
+    EXECUTE format('CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS PASSWORD %L', '$PG_PASS');
+  END IF;
+END \$\$;
+
+-- 設定服務角色密碼
+ALTER ROLE supabase_auth_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_storage_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_functions_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE supabase_realtime_admin WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE authenticator WITH LOGIN PASSWORD '$PG_PASS';
+ALTER ROLE pgbouncer WITH LOGIN PASSWORD '$PG_PASS';
+
+-- Schema 權限（PostgreSQL 15 public schema 變更）
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT ALL ON SCHEMA public TO supabase_storage_admin;
+GRANT ALL ON SCHEMA public TO supabase_functions_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+
+-- 儀表板使用者預設權限
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_auth_admin IN SCHEMA auth
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON TABLES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON SEQUENCES TO postgres, dashboard_user;
+ALTER DEFAULT PRIVILEGES FOR ROLE supabase_storage_admin IN SCHEMA storage
+  GRANT ALL ON ROUTINES TO postgres, dashboard_user;
+EOSQL
+
+# 建立 _supabase 資料庫
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres -c \
+  "SELECT 1 FROM pg_database WHERE datname='_supabase'" | grep -q 1 || \
+  kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres -c \
+  "CREATE DATABASE _supabase OWNER supabase_admin;"
+
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d _supabase -c \
+  "CREATE SCHEMA IF NOT EXISTS _analytics;"
+
+echo "=== 步驟 1-3 完成。重新啟動服務... ==="
+kubectl -n $NS rollout restart deploy --all
+
+echo "=== 等待 30 秒讓 GoTrue 執行初始 migration... ==="
+sleep 30
+
+# 步驟 4：將 enum 從 public 移至 auth schema
+kubectl -n $NS exec -i sts/db -- psql -U supabase_admin -d postgres <<EOSQL
+DO \$\$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='factor_type' AND n.nspname='public') THEN
+    ALTER TYPE public.factor_type SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='factor_status' AND n.nspname='public') THEN
+    ALTER TYPE public.factor_status SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='aal_level' AND n.nspname='public') THEN
+    ALTER TYPE public.aal_level SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='code_challenge_method' AND n.nspname='public') THEN
+    ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+  END IF;
+  IF EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON t.typnamespace=n.oid
+             WHERE t.typname='one_time_token_type' AND n.nspname='public') THEN
+    ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+  END IF;
+END \$\$;
+EOSQL
+
+echo "=== 步驟 4 完成。重新啟動 auth... ==="
+kubectl -n $NS rollout restart deploy/auth
+
+echo "=== 部署後設定完成！檢查狀態：kubectl -n $NS get pods ==="
 ```
 
 ### 設定
@@ -753,15 +1278,101 @@ kubectl -n supabase wait --for=condition=ready pod -l component=db --timeout=120
 kubectl -n supabase rollout restart deploy --all
 ```
 
+#### Auth：`type "auth.factor_type" does not exist (SQLSTATE 42704)`
+
+**根本原因：** GoTrue 的早期 migration 在 `public` schema 建立 enum 類型（`factor_type`、`factor_status`、`aal_level`、`code_challenge_method`、`one_time_token_type`），沒有指定 schema。後續 migration（如 `20240729123726_add_mfa_phone_config`）以 `auth.factor_type` 引用，因 enum 在 `public` 而非 `auth` 而失敗。
+
+**修復：** 將 enum 移至 `auth` schema：
+
+```sql
+ALTER TYPE public.factor_type SET SCHEMA auth;
+ALTER TYPE public.factor_status SET SCHEMA auth;
+ALTER TYPE public.aal_level SET SCHEMA auth;
+ALTER TYPE public.code_challenge_method SET SCHEMA auth;
+ALTER TYPE public.one_time_token_type SET SCHEMA auth;
+```
+
+然後重新啟動 auth：`kubectl -n supabase rollout restart deploy/auth`
+
+> **重要：** 如果有舊的 auth ReplicaSet Pod 仍在 CrashLoopBackOff，請先將其縮放為 0 以防止干擾：
+> ```bash
+> kubectl -n supabase get rs -l component=auth
+> kubectl -n supabase scale rs/<舊的-replicaset-名稱> --replicas=0
+> ```
+
+#### Auth：`role "postgres" does not exist`
+
+**根本原因：** GoTrue 和 Storage 的 migration SQL 硬編碼了 `GRANT ... TO postgres`。`supabase/postgres` 映像檔使用 `supabase_admin` 作為超級使用者，而非 `postgres`。
+
+**修復：** 建立 `postgres` 角色：
+```sql
+CREATE ROLE postgres WITH LOGIN SUPERUSER CREATEDB CREATEROLE
+  REPLICATION BYPASSRLS PASSWORD 'YOUR_POSTGRES_PASSWORD';
+```
+
+#### Auth：`permission denied for schema public (SQLSTATE 42501)`
+
+**根本原因：** PostgreSQL 15 將 `public` schema 的擁有權從 `postgres` 改為 `pg_database_owner`。服務角色預設沒有 public 的 CREATE 權限。
+
+**修復：**
+```sql
+GRANT ALL ON SCHEMA public TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_auth_admin;
+GRANT CREATE ON DATABASE postgres TO supabase_storage_admin;
+```
+
+#### Analytics/Supavisor：資料庫 `_supabase` 不存在
+
+**根本原因：** `supabase/postgres` 映像檔不會建立 `_supabase` 資料庫。Analytics (Logflare) 和 Supavisor 需要它。
+
+**修復：**
+```sql
+CREATE DATABASE _supabase OWNER supabase_admin;
+\c _supabase
+CREATE SCHEMA IF NOT EXISTS _analytics;
+```
+
+#### Realtime：健康檢查回傳 404
+
+**根本原因：** `supabase/realtime` v2.x（基於 Elixir）不提供 HTTP `/api/health` 端點。
+
+**修復：** 使用 TCP socket 探測替代 HTTP：
+```yaml
+livenessProbe:
+  tcpSocket:
+    port: 4000
+readinessProbe:
+  tcpSocket:
+    port: 4000
+```
+
+#### Realtime：`cookie store expects conn.secret_key_base to be at least 64 bytes`
+
+**根本原因：** `secret.yaml` 中的 `SECRET_KEY_BASE` 值短於 64 位元組。
+
+**修復：** 確保 `SECRET_KEY_BASE` 至少 64 字元：
+```bash
+openssl rand -base64 48
+echo -n '您的64字元以上密鑰' | base64
+```
+
+#### Studio：readiness 探測在 `/api/profile` 失敗
+
+**根本原因：** `/api/profile` 端點需要認證，未認證時回傳非 200 狀態碼。
+
+**修復：** 使用 TCP socket 探測：
+```yaml
+readinessProbe:
+  tcpSocket:
+    port: 3000
+```
+
 #### Kong 返回 502 錯誤
 
 上游服務無法連線。檢查目標服務 Pod 是否正在運行：
 
 ```bash
-# 列出所有 Pod 以找出哪個服務已停止
 kubectl -n supabase get pods
-
-# 檢查 Kong 日誌以查看特定上游服務
 kubectl -n supabase logs deploy/kong
 ```
 
@@ -778,36 +1389,56 @@ kubectl -n supabase logs deploy/studio
 #### 身份驗證無法運作
 
 ```bash
-# 檢查 GoTrue 身份驗證服務
 kubectl -n supabase get pods -l component=auth
 kubectl -n supabase logs deploy/auth
-
-# 驗證 JWT Secret 在各服務間是否一致
 kubectl -n supabase get secret supabase-secret -o jsonpath='{.data.JWT_SECRET}' | base64 -d
 ```
 
 #### 即時訂閱失敗
 
 ```bash
-# 檢查 Realtime 服務
 kubectl -n supabase logs deploy/realtime
-
-# 從 Realtime Pod 驗證資料庫連線
 kubectl -n supabase exec deploy/realtime -- nc -zv db 5432
 ```
 
 #### 儲存上傳失敗
 
 ```bash
-# 檢查 Storage 服務
 kubectl -n supabase logs deploy/storage
-
-# 驗證 PVC 有可用空間
 kubectl -n supabase exec deploy/storage -- df -h /var/lib/storage
-
-# 檢查 imgproxy 影像轉換問題
 kubectl -n supabase logs deploy/imgproxy
 ```
+
+### 已知問題與重要注意事項
+
+| 問題 | 原因 | 狀態 |
+|------|------|------|
+| `docker-entrypoint-initdb.d` 腳本不會執行 | `supabase/postgres` 映像檔預先建立了資料目錄 | 設計如此 - 使用手動部署後設定 |
+| GoTrue 在 `public` schema 建立 enum | GoTrue SQL 建立類型時未指定 schema | 解決方案：`ALTER TYPE ... SET SCHEMA auth` |
+| GoTrue/Storage 需要 `postgres` 角色 | Migration SQL 硬編碼 `GRANT ... TO postgres` | 解決方案：手動建立 `postgres` 角色 |
+| PostgreSQL 15 `public` schema 權限 | PG15 將擁有權改為 `pg_database_owner` | 解決方案：明確的 GRANT 語句 |
+| Realtime 沒有 HTTP 健康檢查端點 | 基於 Elixir 的應用使用租戶特定檢查 | 已修復：TCP socket 探測 |
+| Studio `/api/profile` 需要認證 | Next.js API 路由需要 session | 已修復：TCP socket 探測 |
+
+### 部署驗證狀態
+
+全部 13 個服務已在 k3s 上測試並確認運行（2026-03-18）：
+
+| 服務 | 映像檔 | 狀態 | 健康檢查 |
+|------|--------|------|----------|
+| PostgreSQL (db) | `supabase/postgres:15.8.1.085` | 運行中 | TCP :5432 |
+| Auth (GoTrue) | `supabase/gotrue:v2.185.0` | 運行中 | HTTP `/health` → `{"version":"v2.185.0"}` |
+| REST (PostgREST) | `postgrest/postgrest:v12.2.8` | 運行中 | HTTP `/` → 200 |
+| Realtime | `supabase/realtime:v2.72.0` | 運行中 | TCP :4000 |
+| Storage | `supabase/storage-api:v1.22.12` | 運行中 | HTTP `/status` → 200 |
+| Studio | `supabase/studio:2026.01.27-sha-6aa59ff` | 運行中 | TCP :3000 |
+| Kong | `kong:2` | 運行中 | HTTP → 路由流量 |
+| Meta | `supabase/postgres-meta:v0.86.1` | 運行中 | HTTP `/health` → `{"date":"..."}` |
+| Functions | `supabase/edge-runtime:v1.67.4` | 運行中 | HTTP `/` → 200 |
+| Analytics | `supabase/logflare:1.12.0` | 運行中 | HTTP `/` → 302 |
+| Supavisor | `supabase/supavisor:2.5.1` | 運行中 | TCP :5432/:6543 |
+| imgproxy | `darthsim/imgproxy:v3.8.0` | 運行中 | HTTP `/` → 200 |
+| Vector | `timberio/vector:0.34.0-alpine` | 運行中 | TCP :9001 |
 
 ### 正式環境檢查清單
 
