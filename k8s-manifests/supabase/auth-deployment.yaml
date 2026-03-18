@@ -1,0 +1,135 @@
+###############################################################################
+# Supabase Auth (GoTrue) - Deployment
+# Handles authentication, authorization, user management, and JWT issuance.
+# Depends on: db
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: auth
+  namespace: supabase
+  labels:
+    app: supabase
+    component: auth
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: auth
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: auth
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z db 5432; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+      containers:
+        - name: auth
+          image: supabase/gotrue:v2.185.0
+          ports:
+            - containerPort: 9999
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+            - secretRef:
+                name: supabase-secret
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: GOTRUE_DB_DATABASE_URL
+              value: "postgresql://supabase_auth_admin:$(POSTGRES_PASSWORD)@db:5432/postgres"
+            - name: GOTRUE_API_HOST
+              value: "0.0.0.0"
+            - name: GOTRUE_API_PORT
+              value: "9999"
+            - name: API_EXTERNAL_URL
+              value: "http://localhost:8000"
+            - name: GOTRUE_SITE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: SITE_URL
+            - name: GOTRUE_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: GOTRUE_JWT_DEFAULT_GROUP_NAME
+              value: "authenticated"
+            - name: GOTRUE_JWT_ADMIN_ROLES
+              value: "service_role"
+            - name: GOTRUE_JWT_AUD
+              value: "authenticated"
+            - name: GOTRUE_JWT_EXP
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: JWT_EXPIRY
+            - name: GOTRUE_DB_DRIVER
+              value: "postgres"
+            - name: GOTRUE_EXTERNAL_EMAIL_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: ENABLE_EMAIL_SIGNUP
+            - name: GOTRUE_MAILER_AUTOCONFIRM
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: ENABLE_EMAIL_AUTOCONFIRM
+            - name: GOTRUE_EXTERNAL_PHONE_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: ENABLE_PHONE_SIGNUP
+            - name: GOTRUE_SMS_AUTOCONFIRM
+              value: "true"
+            - name: GOTRUE_DISABLE_SIGNUP
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: DISABLE_SIGNUP
+            - name: GOTRUE_EXTERNAL_ANONYMOUS_USERS_ENABLED
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: ENABLE_ANONYMOUS_USERS
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9999
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9999
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3

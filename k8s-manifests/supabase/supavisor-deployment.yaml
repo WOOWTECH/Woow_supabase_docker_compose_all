@@ -1,0 +1,123 @@
+###############################################################################
+# Supabase Supavisor - Deployment
+# High-performance PostgreSQL connection pooler built in Elixir.
+# Handles connection pooling for both direct (5432) and pooled (6543) modes.
+# Replaces PgBouncer in newer Supabase deployments.
+# Depends on: db
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: supavisor
+  namespace: supabase
+  labels:
+    app: supabase
+    component: supavisor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: supavisor
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: supavisor
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z db 5432; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+      containers:
+        - name: supavisor
+          image: supabase/supavisor:2.7.4
+          ports:
+            - containerPort: 5432
+              name: postgres
+              protocol: TCP
+            - containerPort: 6543
+              name: pooler
+              protocol: TCP
+            - containerPort: 4000
+              name: api
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+            - secretRef:
+                name: supabase-secret
+          env:
+            - name: PORT
+              value: "4000"
+            - name: PROXY_PORT_SESSION
+              value: "5432"
+            - name: PROXY_PORT_TRANSACTION
+              value: "6543"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "ecto://supabase_admin:$(POSTGRES_PASSWORD)@db:5432/_supabase"
+            - name: SECRET_KEY_BASE
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: SECRET_KEY_BASE
+            - name: VAULT_ENC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: VAULT_ENC_KEY
+            - name: API_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: METRICS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: REGION
+              value: "local"
+            - name: FLY_ALLOC_ID
+              value: "fly123"
+            - name: FLY_APP_NAME
+              value: "supavisor"
+            - name: ERL_AFLAGS
+              value: "-proto_dist inet_tcp"
+            - name: CLUSTER_POSTGRES
+              value: "true"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 4000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 4000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3

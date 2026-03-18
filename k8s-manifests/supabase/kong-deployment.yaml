@@ -1,0 +1,337 @@
+###############################################################################
+# Supabase Kong API Gateway - Deployment
+# Routes all external API traffic to internal Supabase services.
+# Uses declarative configuration (DB-less mode) via ConfigMap.
+# This is the main entry point for the Supabase API.
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kong
+  namespace: supabase
+  labels:
+    app: supabase
+    component: kong
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: kong
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: kong
+    spec:
+      containers:
+        - name: kong
+          image: kong:2.8.1
+          ports:
+            - containerPort: 8000
+              name: http
+              protocol: TCP
+            - containerPort: 8443
+              name: https
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+          env:
+            - name: KONG_DATABASE
+              value: "off"
+            - name: KONG_DECLARATIVE_CONFIG
+              value: "/var/lib/kong/kong.yml"
+            - name: KONG_DNS_ORDER
+              value: "LAST,A,CNAME"
+            - name: KONG_PLUGINS
+              value: "request-transformer,cors,key-auth,acl,basic-auth"
+            - name: KONG_NGINX_PROXY_PROXY_BUFFER_SIZE
+              value: "160k"
+            - name: KONG_NGINX_PROXY_PROXY_BUFFERS
+              value: "64 160k"
+            - name: SUPABASE_ANON_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: ANON_KEY
+            - name: SUPABASE_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: SERVICE_ROLE_KEY
+          volumeMounts:
+            - name: kong-config
+              mountPath: /var/lib/kong
+              readOnly: true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: kong-config
+          configMap:
+            name: kong-config
+---
+###############################################################################
+# Kong Declarative Configuration
+# Defines all routes, services, plugins, and consumers for the API gateway.
+# Routes map URL paths to internal Supabase service endpoints.
+###############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kong-config
+  namespace: supabase
+  labels:
+    app: supabase
+    component: kong
+data:
+  kong.yml: |
+    _format_version: "1.1"
+
+    consumers:
+      - username: DASHBOARD
+      - username: anon
+        keyauth_credentials:
+          - key: ${SUPABASE_ANON_KEY:-CHANGE_ME_ANON_KEY}
+      - username: service_role
+        keyauth_credentials:
+          - key: ${SUPABASE_SERVICE_KEY:-CHANGE_ME_SERVICE_ROLE_KEY}
+
+    acls:
+      - consumer: anon
+        group: anon
+      - consumer: service_role
+        group: admin
+
+    services:
+      ## --- Auth (GoTrue) ---
+      - name: auth-v1-open
+        url: http://auth:9999/verify
+        routes:
+          - name: auth-v1-open
+            strip_path: true
+            paths:
+              - /auth/v1/verify
+        plugins:
+          - name: cors
+
+      - name: auth-v1-open-callback
+        url: http://auth:9999/callback
+        routes:
+          - name: auth-v1-open-callback
+            strip_path: true
+            paths:
+              - /auth/v1/callback
+        plugins:
+          - name: cors
+
+      - name: auth-v1-open-authorize
+        url: http://auth:9999/authorize
+        routes:
+          - name: auth-v1-open-authorize
+            strip_path: true
+            paths:
+              - /auth/v1/authorize
+        plugins:
+          - name: cors
+
+      - name: auth-v1
+        _comment: "GoTrue: /auth/v1/* -> http://auth:9999/*"
+        url: http://auth:9999/
+        routes:
+          - name: auth-v1
+            strip_path: true
+            paths:
+              - /auth/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- PostgREST ---
+      - name: rest-v1
+        _comment: "PostgREST: /rest/v1/* -> http://rest:3000/*"
+        url: http://rest:3000/
+        routes:
+          - name: rest-v1
+            strip_path: true
+            paths:
+              - /rest/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: true
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- GraphQL (through PostgREST) ---
+      - name: graphql-v1
+        _comment: "PostgREST: /graphql/v1/* -> http://rest:3000/rpc/graphql"
+        url: http://rest:3000/rpc/graphql
+        routes:
+          - name: graphql-v1
+            strip_path: true
+            paths:
+              - /graphql/v1
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: true
+          - name: request-transformer
+            config:
+              add:
+                headers:
+                  - Content-Profile:graphql_public
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- Realtime ---
+      - name: realtime-v1-ws
+        _comment: "Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*"
+        url: http://realtime:4000/socket/
+        routes:
+          - name: realtime-v1-ws
+            strip_path: true
+            paths:
+              - /realtime/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- Storage ---
+      - name: storage-v1
+        _comment: "Storage: /storage/v1/* -> http://storage:5000/*"
+        url: http://storage:5000/
+        routes:
+          - name: storage-v1
+            strip_path: true
+            paths:
+              - /storage/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- Edge Functions ---
+      - name: functions-v1
+        _comment: "Functions: /functions/v1/* -> http://functions:9000/*"
+        url: http://functions:9000/
+        routes:
+          - name: functions-v1
+            strip_path: true
+            paths:
+              - /functions/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+                - anon
+
+      ## --- Postgres Meta ---
+      - name: meta
+        _comment: "pg-meta: /pg/* -> http://meta:8080/*"
+        url: http://meta:8080/
+        routes:
+          - name: meta
+            strip_path: true
+            paths:
+              - /pg/
+        plugins:
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+
+      ## --- Analytics (Logflare) ---
+      - name: analytics-v1
+        _comment: "Analytics: /analytics/v1/* -> http://analytics:4000/*"
+        url: http://analytics:4000/
+        routes:
+          - name: analytics-v1
+            strip_path: true
+            paths:
+              - /analytics/v1/
+        plugins:
+          - name: cors
+          - name: key-auth
+            config:
+              hide_credentials: false
+          - name: acl
+            config:
+              hide_groups_header: true
+              allow:
+                - admin
+
+      ## --- Dashboard (Basic Auth protected) ---
+      - name: dashboard
+        _comment: "Studio Dashboard"
+        url: http://studio:3000/
+        routes:
+          - name: dashboard
+            strip_path: true
+            paths:
+              - /
+        plugins:
+          - name: cors
+          - name: basic-auth
+            config:
+              hide_credentials: true

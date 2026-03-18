@@ -1,0 +1,38 @@
+###############################################################################
+# Supabase Persistent Volume Claims
+# Uses k3s local-path provisioner for development/single-node deployments.
+# For production, replace storageClassName with a network-attached storage
+# class (e.g., longhorn, ceph-rbd, nfs-csi).
+###############################################################################
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: db-data
+  namespace: supabase
+  labels:
+    app: supabase
+    component: db
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 8Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: storage-data
+  namespace: supabase
+  labels:
+    app: supabase
+    component: storage
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 10Gi

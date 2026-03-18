@@ -1,0 +1,110 @@
+###############################################################################
+# Supabase Studio - Deployment
+# Web-based administration dashboard for managing the Supabase instance.
+# Provides UI for table editor, SQL editor, auth management, storage,
+# edge functions, and real-time monitoring.
+# Depends on: kong (API gateway), meta, analytics
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: studio
+  namespace: supabase
+  labels:
+    app: supabase
+    component: studio
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: studio
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: studio
+    spec:
+      containers:
+        - name: studio
+          image: supabase/studio:2026.01.27-sha-6aa59ff
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+          env:
+            - name: STUDIO_PG_META_URL
+              value: "http://meta:8080"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: DEFAULT_ORGANIZATION_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: STUDIO_DEFAULT_ORGANIZATION
+            - name: DEFAULT_PROJECT_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: STUDIO_DEFAULT_PROJECT
+            - name: SUPABASE_URL
+              value: "http://kong:8000"
+            - name: SUPABASE_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: SUPABASE_PUBLIC_URL
+            - name: SUPABASE_ANON_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: ANON_KEY
+            - name: SUPABASE_SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: SERVICE_ROLE_KEY
+            - name: AUTH_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: LOGFLARE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: LOGFLARE_PRIVATE_ACCESS_TOKEN
+            - name: LOGFLARE_URL
+              value: "http://analytics:4000"
+            - name: NEXT_PUBLIC_ENABLE_LOGS
+              value: "true"
+            - name: NEXT_ANALYTICS_BACKEND_PROVIDER
+              value: "postgres"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          livenessProbe:
+            httpGet:
+              path: /api/profile
+              port: 3000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /api/profile
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5

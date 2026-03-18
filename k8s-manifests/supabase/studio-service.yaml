@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Studio - Service
+# Internal service for the Studio dashboard. Accessed through Kong API gateway.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: studio
+  namespace: supabase
+  labels:
+    app: supabase
+    component: studio
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: studio
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP

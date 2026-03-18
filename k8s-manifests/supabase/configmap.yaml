@@ -1,0 +1,106 @@
+###############################################################################
+# Supabase ConfigMap
+# Non-sensitive configuration shared across Supabase services.
+# Adjust SITE_URL, API_EXTERNAL_URL, and SUPABASE_PUBLIC_URL for your domain.
+###############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supabase-config
+  namespace: supabase
+  labels:
+    app: supabase
+data:
+  # --- PostgreSQL ---
+  POSTGRES_HOST: "db"
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: "postgres"
+  POSTGRES_USER: "supabase_admin"
+
+  # --- URLs (change for production) ---
+  SITE_URL: "http://localhost"
+  API_EXTERNAL_URL: "http://localhost:8000"
+  SUPABASE_PUBLIC_URL: "http://localhost:8000"
+  SUPABASE_URL: "http://kong:8000"
+
+  # --- Auth (GoTrue) ---
+  JWT_EXPIRY: "3600"
+  DISABLE_SIGNUP: "false"
+  ENABLE_EMAIL_SIGNUP: "true"
+  ENABLE_EMAIL_AUTOCONFIRM: "true"
+  ENABLE_ANONYMOUS_USERS: "false"
+  ENABLE_PHONE_SIGNUP: "false"
+  GOTRUE_API_HOST: "0.0.0.0"
+  GOTRUE_API_PORT: "9999"
+  GOTRUE_SITE_URL: "http://localhost"
+  GOTRUE_URI_ALLOW_LIST: ""
+  GOTRUE_JWT_DEFAULT_GROUP_NAME: "authenticated"
+  GOTRUE_JWT_ADMIN_ROLES: "service_role"
+  GOTRUE_JWT_AUD: "authenticated"
+  GOTRUE_JWT_EXP: "3600"
+  GOTRUE_EXTERNAL_EMAIL_ENABLED: "true"
+  GOTRUE_MAILER_AUTOCONFIRM: "true"
+  GOTRUE_SMTP_ADMIN_EMAIL: "admin@example.com"
+  GOTRUE_SMTP_HOST: ""
+  GOTRUE_SMTP_PORT: "587"
+  GOTRUE_SMTP_SENDER_NAME: "Supabase"
+  GOTRUE_EXTERNAL_PHONE_ENABLED: "false"
+  GOTRUE_SMS_AUTOCONFIRM: "true"
+  GOTRUE_DB_DRIVER: "postgres"
+
+  # --- PostgREST ---
+  PGRST_DB_SCHEMAS: "public,storage,graphql_public"
+  PGRST_DB_ANON_ROLE: "anon"
+  PGRST_DB_USE_LEGACY_GUCS: "false"
+  PGRST_APP_SETTINGS_JWT_EXP: "3600"
+
+  # --- Realtime ---
+  REALTIME_DB_HOST: "db"
+  REALTIME_DB_PORT: "5432"
+  REALTIME_DB_NAME: "postgres"
+  REALTIME_DB_USER: "supabase_admin"
+
+  # --- Storage ---
+  STORAGE_BACKEND: "file"
+  FILE_SIZE_LIMIT: "52428800"
+  FILE_STORAGE_BACKEND_PATH: "/var/lib/storage"
+  TENANT_ID: "stub"
+  REGION: "stub"
+  GLOBAL_S3_BUCKET: "stub"
+
+  # --- imgproxy ---
+  IMGPROXY_ENABLE_WEBP_DETECTION: "true"
+
+  # --- Functions ---
+  FUNCTIONS_VERIFY_JWT: "false"
+
+  # --- Studio ---
+  STUDIO_DEFAULT_ORGANIZATION: "Default"
+  STUDIO_DEFAULT_PROJECT: "Default"
+  STUDIO_PORT: "3000"
+  SUPABASE_STUDIO_PORT: "3000"
+  NEXT_PUBLIC_ENABLE_LOGS: "true"
+  NEXT_ANALYTICS_BACKEND_PROVIDER: "postgres"
+
+  # --- Supavisor (connection pooler) ---
+  POOLER_TENANT_ID: "default-tenant"
+  POOLER_DEFAULT_POOL_SIZE: "20"
+  POOLER_MAX_CLIENT_CONN: "200"
+  POOLER_DB_POOL_SIZE: "5"
+  POOLER_MODE: "transaction"
+
+  # --- Analytics / Logflare ---
+  LOGFLARE_NODE_HOST: "127.0.0.1"
+  LOGFLARE_BACKEND_TYPE: "postgres"
+  LOGFLARE_FEATURE_FLAG_OVERRIDE: "multibackend=true"
+
+  # --- Kong ---
+  KONG_DATABASE: "off"
+  KONG_DECLARATIVE_CONFIG: "/var/lib/kong/kong.yml"
+  KONG_DNS_ORDER: "LAST,A,CNAME"
+  KONG_PLUGINS: "request-transformer,cors,key-auth,acl,basic-auth"
+  KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: "160k"
+  KONG_NGINX_PROXY_PROXY_BUFFERS: "64 160k"
+
+  # --- Vector ---
+  VECTOR_CONFIG_DIR: "/etc/vector"

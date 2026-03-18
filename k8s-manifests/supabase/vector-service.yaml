@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Vector - Service
+# Exposes the Vector API for health checks and log ingestion.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: vector
+  namespace: supabase
+  labels:
+    app: supabase
+    component: vector
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: vector
+  ports:
+    - name: api
+      port: 9001
+      targetPort: 9001
+      protocol: TCP

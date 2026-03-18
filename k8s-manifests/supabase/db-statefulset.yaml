@@ -1,0 +1,244 @@
+###############################################################################
+# Supabase PostgreSQL - StatefulSet
+# Core database for all Supabase services. Uses the official Supabase
+# Postgres image which includes required extensions (pg_net, pgsodium,
+# supautils, etc.) and initialization scripts.
+#
+# The initdb ConfigMap should contain SQL scripts to bootstrap roles,
+# schemas, and extensions required by Supabase services.
+###############################################################################
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: db
+  namespace: supabase
+  labels:
+    app: supabase
+    component: db
+spec:
+  serviceName: db
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: db
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: db
+    spec:
+      initContainers:
+        - name: init-config
+          image: busybox:1.36
+          command: ['sh', '-c', 'touch /etc/postgresql-custom/wal-g.conf /etc/postgresql-custom/read-replica.conf /etc/postgresql-custom/supautils.conf']
+          volumeMounts:
+            - name: db-config
+              mountPath: /etc/postgresql-custom
+      containers:
+        - name: postgres
+          image: supabase/postgres:15.8.1.085
+          ports:
+            - containerPort: 5432
+              name: postgres
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+            - secretRef:
+                name: supabase-secret
+          env:
+            - name: POSTGRES_HOST
+              value: /var/run/postgresql
+            - name: PGPORT
+              value: "5432"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGDATABASE
+              value: postgres
+            - name: POSTGRES_INITDB_ARGS
+              value: "--locale=C.UTF-8"
+          volumeMounts:
+            - name: db-data
+              mountPath: /var/lib/postgresql/data
+            - name: db-config
+              mountPath: /etc/postgresql-custom
+            - name: initdb-scripts
+              mountPath: /docker-entrypoint-initdb.d
+              readOnly: true
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          livenessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - supabase_admin
+                - -d
+                - postgres
+                - -h
+                - /var/run/postgresql
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - supabase_admin
+                - -d
+                - postgres
+                - -h
+                - /var/run/postgresql
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          startupProbe:
+            exec:
+              command:
+                - pg_isready
+                - -U
+                - supabase_admin
+                - -d
+                - postgres
+                - -h
+                - /var/run/postgresql
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 30
+      volumes:
+        - name: db-data
+          persistentVolumeClaim:
+            claimName: db-data
+        - name: db-config
+          emptyDir: {}
+        - name: initdb-scripts
+          configMap:
+            name: db-initdb-scripts
+            optional: true
+      terminationGracePeriodSeconds: 60
+---
+###############################################################################
+# Database Initialization Scripts ConfigMap
+# Contains SQL to bootstrap Supabase roles, schemas, and extensions.
+# The Supabase Postgres image runs these on first startup.
+###############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-initdb-scripts
+  namespace: supabase
+  labels:
+    app: supabase
+    component: db
+data:
+  00-initial-schema.sql: |
+    -- Supabase required roles
+    -- Note: In k8s, current_setting('app.settings.postgres_password') is not available.
+    -- Roles use PGPASSWORD env var via pg_pass variable. Update passwords after deployment
+    -- if using a different password than the default.
+    DO $$
+    DECLARE
+      pg_pass TEXT := current_setting('PGPASSWORD', true);
+    BEGIN
+      IF pg_pass IS NULL OR pg_pass = '' THEN
+        pg_pass := 'CHANGE_ME_POSTGRES_PASSWORD';
+      END IF;
+      -- Create roles if they don't exist
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_admin') THEN
+        EXECUTE format('CREATE ROLE supabase_admin WITH LOGIN PASSWORD %L SUPERUSER CREATEDB CREATEROLE REPLICATION BYPASSRLS', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE supabase_admin WITH PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN
+        EXECUTE format('CREATE ROLE authenticator WITH LOGIN PASSWORD %L NOINHERIT', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE authenticator WITH PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN
+        CREATE ROLE anon NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN
+        CREATE ROLE authenticated NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN
+        CREATE ROLE service_role NOLOGIN NOINHERIT BYPASSRLS;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN
+        EXECUTE format('CREATE ROLE supabase_auth_admin WITH LOGIN PASSWORD %L NOINHERIT CREATEROLE', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE supabase_auth_admin WITH LOGIN PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN
+        EXECUTE format('CREATE ROLE supabase_storage_admin WITH LOGIN PASSWORD %L NOINHERIT CREATEROLE', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE supabase_storage_admin WITH LOGIN PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_functions_admin') THEN
+        EXECUTE format('CREATE ROLE supabase_functions_admin WITH LOGIN PASSWORD %L NOINHERIT CREATEROLE', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE supabase_functions_admin WITH LOGIN PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_realtime_admin') THEN
+        EXECUTE format('CREATE ROLE supabase_realtime_admin WITH LOGIN PASSWORD %L NOINHERIT', pg_pass);
+      ELSE
+        EXECUTE format('ALTER ROLE supabase_realtime_admin WITH LOGIN PASSWORD %L', pg_pass);
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_read_only_user') THEN
+        CREATE ROLE supabase_read_only_user NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'dashboard_user') THEN
+        CREATE ROLE dashboard_user NOLOGIN NOINHERIT CREATEROLE;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgbouncer') THEN
+        CREATE ROLE pgbouncer NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgsodium_keyholder') THEN
+        CREATE ROLE pgsodium_keyholder NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgsodium_keyiduser') THEN
+        CREATE ROLE pgsodium_keyiduser NOLOGIN NOINHERIT;
+      END IF;
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'pgsodium_keymaker') THEN
+        CREATE ROLE pgsodium_keymaker NOLOGIN NOINHERIT;
+      END IF;
+    END
+    $$;
+
+    -- Grant role memberships
+    GRANT anon TO authenticator;
+    GRANT authenticated TO authenticator;
+    GRANT service_role TO authenticator;
+    GRANT supabase_admin TO authenticator;
+
+    -- Create required schemas
+    CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION supabase_auth_admin;
+    CREATE SCHEMA IF NOT EXISTS storage AUTHORIZATION supabase_storage_admin;
+    CREATE SCHEMA IF NOT EXISTS extensions;
+    CREATE SCHEMA IF NOT EXISTS graphql_public;
+    CREATE SCHEMA IF NOT EXISTS _realtime;
+    CREATE SCHEMA IF NOT EXISTS supabase_functions AUTHORIZATION supabase_functions_admin;
+    CREATE SCHEMA IF NOT EXISTS _analytics;
+
+    -- Enable required extensions
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA extensions;
+    CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA extensions;
+    CREATE EXTENSION IF NOT EXISTS pgjwt SCHEMA extensions;
+
+    -- Grant schema access
+    GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+    GRANT USAGE ON SCHEMA extensions TO anon, authenticated, service_role;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO anon, authenticated, service_role;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON FUNCTIONS TO anon, authenticated, service_role;
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;

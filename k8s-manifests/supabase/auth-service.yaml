@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Auth (GoTrue) - Service
+# Internal service for authentication. Accessed by Kong API gateway.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: auth
+  namespace: supabase
+  labels:
+    app: supabase
+    component: auth
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: auth
+  ports:
+    - name: http
+      port: 9999
+      targetPort: 9999
+      protocol: TCP

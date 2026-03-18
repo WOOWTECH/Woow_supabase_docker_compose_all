@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase PostgreSQL - Service
+# ClusterIP service for internal access by other Supabase services.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: db
+  namespace: supabase
+  labels:
+    app: supabase
+    component: db
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: db
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+      protocol: TCP

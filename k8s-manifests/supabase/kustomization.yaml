@@ -1,0 +1,63 @@
+###############################################################################
+# Supabase Kustomization
+# Manages all Supabase Kubernetes resources for k3s deployment.
+#
+# Usage:
+#   kubectl apply -k /path/to/supabase/
+#   kubectl kustomize /path/to/supabase/ | kubectl apply -f -
+#
+# Deployment order is handled by initContainers in each service that
+# depends on PostgreSQL being ready.
+###############################################################################
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: supabase
+
+commonLabels:
+  app: supabase
+
+resources:
+  # --- Foundation ---
+  - namespace.yaml
+  - secret.yaml
+  - configmap.yaml
+  - pvc.yaml
+
+  # --- Database ---
+  - db-statefulset.yaml
+  - db-service.yaml
+
+  # --- Observability ---
+  - vector-deployment.yaml
+  - vector-service.yaml
+  - analytics-deployment.yaml
+  - analytics-service.yaml
+
+  # --- API Gateway ---
+  - kong-deployment.yaml
+  - kong-service.yaml
+
+  # --- Core Services ---
+  - auth-deployment.yaml
+  - auth-service.yaml
+  - rest-deployment.yaml
+  - rest-service.yaml
+  - realtime-deployment.yaml
+  - realtime-service.yaml
+  - storage-deployment.yaml
+  - storage-service.yaml
+  - imgproxy-deployment.yaml
+  - imgproxy-service.yaml
+  - meta-deployment.yaml
+  - meta-service.yaml
+  - functions-deployment.yaml
+  - functions-service.yaml
+
+  # --- Dashboard ---
+  - studio-deployment.yaml
+  - studio-service.yaml
+
+  # --- Connection Pooler ---
+  - supavisor-deployment.yaml
+  - supavisor-service.yaml

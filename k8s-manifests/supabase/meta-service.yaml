@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Postgres Meta - Service
+# Internal service for database management API. Accessed by Kong and Studio.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: meta
+  namespace: supabase
+  labels:
+    app: supabase
+    component: meta
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: meta
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+      protocol: TCP

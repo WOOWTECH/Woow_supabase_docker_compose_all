@@ -1,0 +1,120 @@
+###############################################################################
+# Supabase Storage - Deployment
+# Manages file uploads, downloads, and permissions with S3-compatible API.
+# Uses a PVC for local file storage backend.
+# Depends on: db, imgproxy
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: storage
+  namespace: supabase
+  labels:
+    app: supabase
+    component: storage
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: storage
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: storage
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z db 5432; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+      containers:
+        - name: storage
+          image: supabase/storage-api:v1.33.5
+          ports:
+            - containerPort: 5000
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+          env:
+            - name: SERVER_PORT
+              value: "5000"
+            - name: STORAGE_BACKEND
+              value: "file"
+            - name: FILE_STORAGE_BACKEND_PATH
+              value: "/var/lib/storage"
+            - name: FILE_SIZE_LIMIT
+              value: "52428800"
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: DATABASE_URL
+              value: "postgresql://supabase_storage_admin:$(POSTGRES_PASSWORD)@db:5432/postgres"
+            - name: POSTGREST_URL
+              value: "http://rest:3000"
+            - name: PGRST_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: ANON_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: ANON_KEY
+            - name: SERVICE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: SERVICE_ROLE_KEY
+            - name: TENANT_ID
+              value: "stub"
+            - name: REGION
+              value: "stub"
+            - name: GLOBAL_S3_BUCKET
+              value: "stub"
+            - name: ENABLE_IMAGE_TRANSFORMATION
+              value: "true"
+            - name: IMGPROXY_URL
+              value: "http://imgproxy:5001"
+          volumeMounts:
+            - name: storage-data
+              mountPath: /var/lib/storage
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+      volumes:
+        - name: storage-data
+          persistentVolumeClaim:
+            claimName: storage-data

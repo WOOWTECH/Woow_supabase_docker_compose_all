@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Analytics (Logflare) - Service
+# Internal service for log ingestion and query APIs.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: analytics
+  namespace: supabase
+  labels:
+    app: supabase
+    component: analytics
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: analytics
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+      protocol: TCP

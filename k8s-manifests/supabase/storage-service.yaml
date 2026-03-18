@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Storage - Service
+# Internal service for file storage API. Accessed by Kong API gateway.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: storage
+  namespace: supabase
+  labels:
+    app: supabase
+    component: storage
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: storage
+  ports:
+    - name: http
+      port: 5000
+      targetPort: 5000
+      protocol: TCP

@@ -1,0 +1,100 @@
+###############################################################################
+# Supabase REST (PostgREST) - Deployment
+# Auto-generates a RESTful API from the PostgreSQL schema.
+# Depends on: db
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rest
+  namespace: supabase
+  labels:
+    app: supabase
+    component: rest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: rest
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: rest
+    spec:
+      initContainers:
+        - name: wait-for-db
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z db 5432; do
+                echo "Waiting for PostgreSQL..."
+                sleep 2
+              done
+              echo "PostgreSQL is ready"
+      containers:
+        - name: rest
+          image: postgrest/postgrest:v14.3
+          ports:
+            - containerPort: 3000
+              name: http
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+          env:
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: PGRST_DB_URI
+              value: "postgresql://authenticator:$(POSTGRES_PASSWORD)@db:5432/postgres"
+            - name: PGRST_DB_SCHEMAS
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: PGRST_DB_SCHEMAS
+            - name: PGRST_DB_ANON_ROLE
+              value: "anon"
+            - name: PGRST_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: PGRST_DB_USE_LEGACY_GUCS
+              value: "false"
+            - name: PGRST_APP_SETTINGS_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: PGRST_APP_SETTINGS_JWT_EXP
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: JWT_EXPIRY
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3

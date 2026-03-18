@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase Edge Functions - Service
+# Internal service for edge function execution. Accessed by Kong API gateway.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: functions
+  namespace: supabase
+  labels:
+    app: supabase
+    component: functions
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: functions
+  ports:
+    - name: http
+      port: 9000
+      targetPort: 9000
+      protocol: TCP

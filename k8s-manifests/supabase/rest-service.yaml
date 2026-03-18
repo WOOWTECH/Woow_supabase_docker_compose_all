@@ -1,0 +1,22 @@
+###############################################################################
+# Supabase REST (PostgREST) - Service
+# Internal service for REST API. Accessed by Kong API gateway.
+###############################################################################
+apiVersion: v1
+kind: Service
+metadata:
+  name: rest
+  namespace: supabase
+  labels:
+    app: supabase
+    component: rest
+spec:
+  type: ClusterIP
+  selector:
+    app: supabase
+    component: rest
+  ports:
+    - name: http
+      port: 3000
+      targetPort: 3000
+      protocol: TCP

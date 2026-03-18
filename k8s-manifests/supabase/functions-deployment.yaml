@@ -1,0 +1,144 @@
+###############################################################################
+# Supabase Edge Functions - Deployment
+# Runs Deno-based edge functions using the Supabase Edge Runtime.
+# Functions are served from a mounted volume or inline configuration.
+# Depends on: db (for function metadata)
+###############################################################################
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: functions
+  namespace: supabase
+  labels:
+    app: supabase
+    component: functions
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: supabase
+      component: functions
+  template:
+    metadata:
+      labels:
+        app: supabase
+        component: functions
+    spec:
+      initContainers:
+        - name: init-functions
+          image: busybox:1.36
+          command: ['sh', '-c', 'mkdir -p /home/deno/functions/main && cp /tmp/fn-src/index.ts /home/deno/functions/main/index.ts']
+          volumeMounts:
+            - name: functions-src
+              mountPath: /tmp/fn-src
+              readOnly: true
+            - name: functions-data
+              mountPath: /home/deno/functions
+      containers:
+        - name: functions
+          image: supabase/edge-runtime:v1.70.0
+          ports:
+            - containerPort: 9000
+              name: http
+              protocol: TCP
+          args:
+            - start
+            - --main-service
+            - /home/deno/functions/main
+          envFrom:
+            - configMapRef:
+                name: supabase-config
+          env:
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: JWT_SECRET
+            - name: SUPABASE_URL
+              value: "http://kong:8000"
+            - name: SUPABASE_ANON_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: ANON_KEY
+            - name: SUPABASE_SERVICE_ROLE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: SERVICE_ROLE_KEY
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: supabase-secret
+                  key: POSTGRES_PASSWORD
+            - name: SUPABASE_DB_URL
+              value: "postgresql://supabase_admin:$(POSTGRES_PASSWORD)@db:5432/postgres"
+            - name: VERIFY_JWT
+              valueFrom:
+                configMapKeyRef:
+                  name: supabase-config
+                  key: FUNCTIONS_VERIFY_JWT
+          volumeMounts:
+            - name: functions-data
+              mountPath: /home/deno/functions
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /_internal/health
+              port: 9000
+            initialDelaySeconds: 15
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /_internal/health
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+      volumes:
+        - name: functions-data
+          emptyDir: {}
+        - name: functions-src
+          configMap:
+            name: functions-main
+            optional: true
+---
+###############################################################################
+# Edge Functions Main Service ConfigMap
+# Contains the main entrypoint function that routes to sub-functions.
+# Replace with your actual edge functions or mount from a PVC/Git volume.
+###############################################################################
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: functions-main
+  namespace: supabase
+  labels:
+    app: supabase
+    component: functions
+data:
+  index.ts: |
+    import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+
+    serve(async (req: Request) => {
+      const url = new URL(req.url);
+      const path = url.pathname;
+
+      return new Response(
+        JSON.stringify({
+          message: `Edge Functions are running. Path: ${path}`,
+        }),
+        {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        }
+      );
+    });

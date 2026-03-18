@@ -1,0 +1,11 @@
+###############################################################################
+# Supabase Namespace
+# Isolates all Supabase resources into a dedicated namespace.
+###############################################################################
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: supabase
+  labels:
+    app: supabase
+    managed-by: kustomize
