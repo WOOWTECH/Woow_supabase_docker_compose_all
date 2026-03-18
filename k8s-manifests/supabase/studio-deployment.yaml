@@ -94,16 +94,14 @@ spec:
               cpu: "1"
               memory: 1Gi
           livenessProbe:
-            httpGet:
-              path: /api/profile
+            tcpSocket:
               port: 3000
             initialDelaySeconds: 20
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 6
           readinessProbe:
-            httpGet:
-              path: /api/profile
+            tcpSocket:
               port: 3000
             initialDelaySeconds: 10
             periodSeconds: 10
